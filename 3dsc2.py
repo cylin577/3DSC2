@@ -5,17 +5,20 @@ import socket
 import threading
 import time
 import json
+import os
 import cv2
 import numpy as np
 import pygame
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QFormLayout, QLineEdit, QPushButton, 
                              QCheckBox, QDialog, QComboBox, QLabel, QMessageBox,
-                             QGroupBox, QTextEdit, QFileDialog)
+                             QGroupBox, QTextEdit, QFileDialog, QSlider)
 from PyQt6.QtCore import (QTimer, QSettings, Qt, QPoint, QByteArray, 
                           QEvent, QObject, pyqtSignal)
 from PyQt6.QtGui import QPainter, QPen, QColor, QMouseEvent, QCloseEvent
 from PyQt6.QtNetwork import QUdpSocket, QHostAddress
+
+from ai_agent import AIManager
 
 # Constants
 CPAD_BOUND = 0x5d0
@@ -25,6 +28,19 @@ TOUCH_SCREEN_HEIGHT = 240
 TOP_TARGET = (400, 240) 
 BOTTOM_TARGET = (320, 240)
 TICK_RATE = 0.050 # 50ms = 20Hz
+TOP_CALIB_TAG_ID = 0
+BOTTOM_CALIB_TAG_ID = 1
+CALIB_TAG_SIZE = 200
+CALIB_TAG_MARGIN_Y = 20
+TOUCH_CALIBRATION_TARGETS = [
+    ("top-left", (20, 20)),
+    ("top-right", (299, 20)),
+    ("bottom-right", (299, 219)),
+    ("bottom-left", (20, 219)),
+    ("center", (160, 120)),
+]
+AUTO_TOUCH_TAP_MS = 120
+AUTO_TOUCH_GAP_MS = 180
 
 class GamepadButtons:
     ButtonA = 0
@@ -59,8 +75,22 @@ class GlobalState:
     abInverse = False
     xyInverse = False
     
+    # AI State
+    ai_controlled = False
+
+    # Calibration State
+    hsv_min = [30, 30, 30]
+    hsv_max = [105, 255, 255]
+    hsv_tolerance = 20
+    last_sampled_hsv = [60, 200, 200]
+    sampled_hsv_std = [8.0, 20.0, 20.0]
+    sampled_exg_mean = 80.0
+    sampled_exg_std = 20.0
+    show_mask = False
+
     touchScreenPressed = False
     touchScreenPosition = QPoint(0, 0)
+    touch_calibration_matrix = None
     settings = None
     
     # TAS state
@@ -73,6 +103,103 @@ class GlobalState:
     heartbeat_running = False
 
 state = GlobalState()
+
+def circular_hue_distance(hue_channel, ref_hue):
+    diff = np.abs(hue_channel.astype(np.float32) - float(ref_hue))
+    return np.minimum(diff, 180.0 - diff)
+
+def tolerance_scale():
+    return max(1.0, state.hsv_tolerance / 10.0)
+
+def sample_screen_color(frame, x, y, radius=10):
+    blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+    h, w = hsv.shape[:2]
+    x0 = max(0, x - radius)
+    x1 = min(w, x + radius + 1)
+    y0 = max(0, y - radius)
+    y1 = min(h, y + radius + 1)
+    patch_hsv = hsv[y0:y1, x0:x1]
+    patch_bgr = blurred[y0:y1, x0:x1].astype(np.int16)
+    if patch_hsv.size == 0:
+        return None
+
+    hsv_mean = patch_hsv.reshape(-1, 3).mean(axis=0)
+    hsv_std = patch_hsv.reshape(-1, 3).std(axis=0)
+    exg_patch = patch_bgr[:, :, 1] - np.maximum(patch_bgr[:, :, 0], patch_bgr[:, :, 2])
+
+    return {
+        "hsv_mean": hsv_mean,
+        "hsv_std": hsv_std,
+        "exg_mean": float(exg_patch.mean()),
+        "exg_std": float(exg_patch.std()),
+    }
+
+def update_sampled_color_model(sample):
+    if sample is None:
+        return
+
+    hsv_mean = sample["hsv_mean"]
+    hsv_std = sample["hsv_std"]
+    state.last_sampled_hsv = [int(round(v)) for v in hsv_mean]
+    state.sampled_hsv_std = [float(max(v, 2.0)) for v in hsv_std]
+    state.sampled_exg_mean = float(sample["exg_mean"])
+    state.sampled_exg_std = float(max(sample["exg_std"], 4.0))
+
+    scale = tolerance_scale()
+    hue_tol = max(6, int(round(state.sampled_hsv_std[0] * scale)))
+    sat_tol = max(20, int(round(state.sampled_hsv_std[1] * scale)))
+    val_tol = max(20, int(round(state.sampled_hsv_std[2] * scale)))
+    state.hsv_min = [
+        max(0, state.last_sampled_hsv[0] - hue_tol),
+        max(0, state.last_sampled_hsv[1] - sat_tol),
+        max(0, state.last_sampled_hsv[2] - val_tol),
+    ]
+    state.hsv_max = [
+        min(179, state.last_sampled_hsv[0] + hue_tol),
+        min(255, state.last_sampled_hsv[1] + sat_tol),
+        min(255, state.last_sampled_hsv[2] + val_tol),
+    ]
+
+def build_calibration_mask(frame):
+    blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+    scale = tolerance_scale()
+
+    ref_h, ref_s, ref_v = [float(v) for v in state.last_sampled_hsv]
+    std_h, std_s, std_v = state.sampled_hsv_std
+
+    hue_tol = min(40.0, max(6.0, std_h * scale))
+    sat_floor = max(20.0, ref_s - max(18.0, std_s * scale * 1.5))
+    val_floor = max(20.0, ref_v - max(18.0, std_v * scale * 1.5))
+    exg_floor = state.sampled_exg_mean - max(12.0, state.sampled_exg_std * scale * 1.5)
+
+    hue_mask = circular_hue_distance(hsv[:, :, 0], ref_h) <= hue_tol
+    sat_mask = hsv[:, :, 1].astype(np.float32) >= sat_floor
+    val_mask = hsv[:, :, 2].astype(np.float32) >= val_floor
+
+    bgr = blurred.astype(np.int16)
+    exg = bgr[:, :, 1] - np.maximum(bgr[:, :, 0], bgr[:, :, 2])
+    exg_mask = exg.astype(np.float32) >= exg_floor
+
+    mask = (hue_mask & sat_mask & val_mask & exg_mask).astype(np.uint8) * 255
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    return mask
+
+def apply_touch_calibration(point):
+    if state.touch_calibration_matrix is None:
+        return point
+
+    src = np.array([[[float(point[0]), float(point[1])]]], dtype=np.float32)
+    mapped = cv2.perspectiveTransform(src, state.touch_calibration_matrix)[0][0]
+    x = int(round(mapped[0]))
+    y = int(round(mapped[1]))
+    return (
+        max(0, min(x, TOUCH_SCREEN_WIDTH - 1)),
+        max(0, min(y, TOUCH_SCREEN_HEIGHT - 1)),
+    )
 
 def variant_to_button(val):
     if val is None: return GamepadButtons.ButtonInvalid
@@ -143,10 +270,12 @@ def get_packet_data():
         cppState = (y << 24) | (x << 16) | (irButtonsState << 8) | 0x81
 
     if state.touchScreenPressed:
-        tx = max(0, min(state.touchScreenPosition.x(), TOUCH_SCREEN_WIDTH))
-        ty = max(0, min(state.touchScreenPosition.y(), TOUCH_SCREEN_HEIGHT))
-        x = int(0xfff * tx / TOUCH_SCREEN_WIDTH)
-        y = int(0xfff * ty / TOUCH_SCREEN_HEIGHT)
+        max_tx = TOUCH_SCREEN_WIDTH - 1
+        max_ty = TOUCH_SCREEN_HEIGHT - 1
+        tx = max(0, min(state.touchScreenPosition.x(), max_tx))
+        ty = max(0, min(state.touchScreenPosition.y(), max_ty))
+        x = int(round(0xfff * tx / max_tx))
+        y = int(round(0xfff * ty / max_ty))
         touchScreenState = (1 << 24) | (y << 12) | x
 
     return struct.pack('<IIIII', hidPad, touchScreenState, circlePadState, cppState, state.interfaceButtons)
@@ -166,6 +295,7 @@ def send_packet(ba):
 class GamepadMonitor(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
+        os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
         pygame.init()
         pygame.joystick.init()
         self.joysticks = []
@@ -175,14 +305,31 @@ class GamepadMonitor(QObject):
         self.timer.start(16)
 
     def rescan_joysticks(self):
+        pygame.joystick.quit()
+        pygame.joystick.init()
         self.joysticks = [pygame.joystick.Joystick(i) for i in range(pygame.joystick.get_count())]
-        for joy in self.joysticks: joy.init()
+        for joy in self.joysticks: 
+            joy.init()
+            print(f"Gamepad found: {joy.get_name()}")
 
     def poll_gamepad(self):
         pygame.event.pump()
         if not self.joysticks:
-            if pygame.joystick.get_count() > 0: self.rescan_joysticks()
-            else: return
+            if pygame.joystick.get_count() > 0: 
+                self.rescan_joysticks()
+            else: 
+                # Reset state if no joystick
+                state.lx = 0.0
+                state.ly = 0.0
+                state.rx = 0.0
+                state.ry = 0.0
+                state.buttons = 0
+                return
+        
+        # If AI is controlling, don't read gamepad inputs into global state
+        if state.ai_controlled:
+            return
+
         joy = self.joysticks[0]
         try:
             state.lx = joy.get_axis(0)
@@ -244,6 +391,125 @@ class GamepadMonitor(QObject):
                 state.touchScreenPosition = QPoint(int(state.settings.value("touchButton2X", 0)), int(state.settings.value("touchButton2Y", 0)))
         except pygame.error: pass
 
+import base64
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class ThreadedCamera:
+    def __init__(self, source):
+        self.cap = cv2.VideoCapture(source)
+        # Force low latency flags
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.running = True
+        self.latest_frame = None
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
+
+    def update(self):
+        while self.running:
+            ret, frame = self.cap.read()
+            if ret:
+                with self.lock:
+                    self.latest_frame = frame
+            else:
+                time.sleep(0.01)
+
+    def read(self):
+        with self.lock:
+            return self.latest_frame is not None, self.latest_frame
+
+    def stop(self):
+        self.running = False
+        self.cap.release()
+
+class RemoteCamHandler(BaseHTTPRequestHandler):
+    app_window = None
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        html = """
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body { margin:0; background:#000; color:#fff; font-family:sans-serif; text-align:center; display:flex; flex-direction:column; height:100vh; }
+                video { width:100%; max-height:70vh; background:#222; }
+                #log { padding:20px; font-size:14px; color:#aaa; overflow-y:auto; flex-grow:1; }
+                button { padding:15px; margin:10px; font-size:18px; background:#28a745; color:white; border:none; border-radius:5px; }
+            </style>
+        </head>
+        <body>
+            <h3 style="margin:10px;">3DSC2 Remote Cam</h3>
+            <video id="v" autoplay playsinline muted></video>
+            <button id="b">1. Start Camera</button>
+            <div id="log">Status: Ready. If camera doesn't start, ensure you are using a browser that supports camera access over HTTP (like Chrome on some devices) or use a dedicated IP Cam app.</div>
+            
+            <script>
+                const v = document.getElementById('v');
+                const b = document.getElementById('b');
+                const l = document.getElementById('log');
+
+                function log(msg) { l.innerText = msg; console.log(msg); }
+
+                b.onclick = async () => {
+                    log("Requesting camera...");
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ 
+                            video: { facingMode: "environment", width: {ideal: 640}, height: {ideal: 480} } 
+                        });
+                        v.srcObject = stream;
+                        b.style.display = 'none';
+                        log("Streaming... Look at your PC!");
+                        
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        
+                        setInterval(() => {
+                            if (v.videoWidth === 0) return;
+                            canvas.width = 320; // Lower resolution for ARM stability
+                            canvas.height = (v.videoHeight / v.videoWidth) * 320;
+                            ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+                            
+                            canvas.toBlob((blob) => {
+                                fetch('/u', { method: 'POST', body: blob });
+                            }, 'image/jpeg', 0.6);
+                        }, 66); // ~15 FPS
+                    } catch (e) {
+                        log("ERROR: " + e.message + "\\n\\nOn iOS, Camera often requires HTTPS. Try using an IP Camera app instead if this fails.");
+                    }
+                };
+            </script>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode())
+
+    def do_POST(self):
+        if self.path == '/u':
+            content_length = int(self.headers['Content-Length'])
+            img_data = self.rfile.read(content_length)
+            nparr = np.frombuffer(img_data, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if frame is not None and RemoteCamHandler.app_window:
+                with RemoteCamHandler.app_window.frame_lock:
+                    RemoteCamHandler.app_window.latest_frame = frame
+        
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+    def log_message(self, format, *args): return # Silence logs
+
+class RemoteCamServer(threading.Thread):
+    def __init__(self, window):
+        super().__init__(daemon=True)
+        RemoteCamHandler.app_window = window
+        self.server = HTTPServer(('0.0.0.0', 5000), RemoteCamHandler)
+    def run(self):
+        self.server.serve_forever()
+
 class CameraSignals(QObject):
     status_update = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
@@ -253,48 +519,40 @@ class RemapConfig(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Button Config")
         self.layout = QVBoxLayout(self)
-        self.formLayout = QFormLayout()
         
-        def create_combo(setting_key, default_val):
-            cb = QComboBox()
-            items = [("A (bottom)", GamepadButtons.ButtonA), ("B (right)", GamepadButtons.ButtonB),
-                     ("X (left)", GamepadButtons.ButtonX), ("Y (top)", GamepadButtons.ButtonY),
-                     ("Right", GamepadButtons.ButtonRight), ("Left", GamepadButtons.ButtonLeft),
-                     ("Up", GamepadButtons.ButtonUp), ("Down", GamepadButtons.ButtonDown),
-                     ("RB", GamepadButtons.ButtonR1), ("LB", GamepadButtons.ButtonL1),
-                     ("Select", GamepadButtons.ButtonSelect), ("Start", GamepadButtons.ButtonStart),
-                     ("RT", GamepadButtons.ButtonR2), ("LT", GamepadButtons.ButtonL2),
-                     ("L3", GamepadButtons.ButtonL3), ("R3", GamepadButtons.ButtonR3),
-                     ("Guide", GamepadButtons.ButtonGuide), ("None", GamepadButtons.ButtonInvalid)]
-            for text, data in items: cb.addItem(text, data)
-            idx = cb.findData(variant_to_button(state.settings.value(setting_key, default_val)))
-            if idx >= 0: cb.setCurrentIndex(idx)
-            return cb
-
-        self.combos = {
-            "ButtonA": create_combo("ButtonA", GamepadButtons.ButtonA),
-            "ButtonB": create_combo("ButtonB", GamepadButtons.ButtonB),
-            "ButtonX": create_combo("ButtonX", GamepadButtons.ButtonX),
-            "ButtonY": create_combo("ButtonY", GamepadButtons.ButtonY),
-            "ButtonUp": create_combo("ButtonUp", GamepadButtons.ButtonUp),
-            "ButtonDown": create_combo("ButtonDown", GamepadButtons.ButtonDown),
-            "ButtonLeft": create_combo("ButtonLeft", GamepadButtons.ButtonLeft),
-            "ButtonRight": create_combo("ButtonRight", GamepadButtons.ButtonRight),
-            "ButtonL": create_combo("ButtonL", GamepadButtons.ButtonL1),
-            "ButtonR": create_combo("ButtonR", GamepadButtons.ButtonR1),
-            "ButtonSelect": create_combo("ButtonSelect", GamepadButtons.ButtonSelect),
-            "ButtonStart": create_combo("ButtonStart", GamepadButtons.ButtonStart),
-            "ButtonZL": create_combo("ButtonZL", GamepadButtons.ButtonL2),
-            "ButtonZR": create_combo("ButtonZR", GamepadButtons.ButtonR2),
-            "ButtonHome": create_combo("ButtonHome", GamepadButtons.ButtonInvalid),
-            "ButtonPower": create_combo("ButtonPower", GamepadButtons.ButtonInvalid),
-            "ButtonPowerLong": create_combo("ButtonPowerLong", GamepadButtons.ButtonInvalid),
-            "ButtonT1": create_combo("ButtonT1", GamepadButtons.ButtonInvalid),
-            "ButtonT2": create_combo("ButtonT2", GamepadButtons.ButtonInvalid),
+        scroll_area = QWidget()
+        self.formLayout = QFormLayout(scroll_area)
+        
+        self.mapping_buttons = {}
+        self.record_target = None
+        
+        self.button_names = {
+            GamepadButtons.ButtonA: "A (bottom)", GamepadButtons.ButtonB: "B (right)",
+            GamepadButtons.ButtonX: "X (left)", GamepadButtons.ButtonY: "Y (top)",
+            GamepadButtons.ButtonRight: "Right", GamepadButtons.ButtonLeft: "Left",
+            GamepadButtons.ButtonUp: "Up", GamepadButtons.ButtonDown: "Down",
+            GamepadButtons.ButtonL1: "LB / L", GamepadButtons.ButtonR1: "RB / R",
+            GamepadButtons.ButtonSelect: "Select", GamepadButtons.ButtonStart: "Start",
+            GamepadButtons.ButtonL2: "LT / ZL", GamepadButtons.ButtonR2: "RT / ZR",
+            GamepadButtons.ButtonL3: "L3", GamepadButtons.ButtonR3: "R3",
+            GamepadButtons.ButtonGuide: "Guide", GamepadButtons.ButtonInvalid: "None"
         }
 
-        for label, combo in self.combos.items(): self.formLayout.addRow(label, combo)
-        
+        keys = [
+            "ButtonA", "ButtonB", "ButtonX", "ButtonY",
+            "ButtonUp", "ButtonDown", "ButtonLeft", "ButtonRight",
+            "ButtonL", "ButtonR", "ButtonSelect", "ButtonStart",
+            "ButtonZL", "ButtonZR", "ButtonHome", "ButtonPower",
+            "ButtonPowerLong", "ButtonT1", "ButtonT2"
+        ]
+
+        for key in keys:
+            val = variant_to_button(state.settings.value(key, GamepadButtons.ButtonInvalid))
+            btn = QPushButton(self.button_names.get(val, "None"))
+            btn.clicked.connect(lambda checked, k=key: self.start_recording(k))
+            self.mapping_buttons[key] = btn
+            self.formLayout.addRow(key, btn)
+
         self.t1x = QLineEdit(str(state.settings.value("touchButton1X", 0)))
         self.t1y = QLineEdit(str(state.settings.value("touchButton1Y", 0)))
         self.t2x = QLineEdit(str(state.settings.value("touchButton2X", 0)))
@@ -304,26 +562,242 @@ class RemapConfig(QDialog):
 
         self.saveButton = QPushButton("SAVE")
         self.saveButton.clicked.connect(self.save_settings)
-        self.layout.addLayout(self.formLayout)
+        self.layout.addWidget(scroll_area)
         self.layout.addWidget(self.saveButton)
+        
+        self.poll_timer = QTimer(self)
+        self.poll_timer.timeout.connect(self.poll_recording)
+
+    def start_recording(self, key):
+        self.record_target = key
+        for k, btn in self.mapping_buttons.items():
+            btn.setEnabled(False)
+            if k == key:
+                btn.setText("Press any button...")
+        self.poll_timer.start(50)
+
+    def poll_recording(self):
+        pygame.event.pump()
+        if pygame.joystick.get_count() == 0:
+            return
+        
+        joy = pygame.joystick.Joystick(0)
+        pressed_btn = -1
+        
+        # Check standard buttons
+        for i in range(joy.get_numbuttons()):
+            if joy.get_button(i):
+                # Map standard buttons (this logic depends on pygame's internal mapping)
+                # We'll use a simple approach: if it's pressed, we try to match it to our GamepadButtons enum
+                # Since we don't know the user's specific controller layout, we just record the index
+                # and treat it as the GamepadButtons value for simplicity in this hack.
+                # Realistically, we should just store the raw pygame button index.
+                pressed_btn = i 
+                break
+        
+        # Check hats (D-pad)
+        if pressed_btn == -1 and joy.get_numhats() > 0:
+            hat = joy.get_hat(0)
+            if hat[0] == -1: pressed_btn = GamepadButtons.ButtonLeft
+            elif hat[0] == 1: pressed_btn = GamepadButtons.ButtonRight
+            elif hat[1] == 1: pressed_btn = GamepadButtons.ButtonUp
+            elif hat[1] == -1: pressed_btn = GamepadButtons.ButtonDown
+            
+        # Check triggers (axes)
+        if pressed_btn == -1:
+            if joy.get_numaxes() > 2 and joy.get_axis(2) > 0.5: pressed_btn = GamepadButtons.ButtonL2
+            if joy.get_numaxes() > 5 and joy.get_axis(5) > 0.5: pressed_btn = GamepadButtons.ButtonR2
+
+        if pressed_btn != -1:
+            self.poll_timer.stop()
+            state.settings.setValue(self.record_target, pressed_btn)
+            self.mapping_buttons[self.record_target].setText(self.button_names.get(pressed_btn, f"Button {pressed_btn}"))
+            self.record_target = None
+            for btn in self.mapping_buttons.values():
+                btn.setEnabled(True)
 
     def save_settings(self):
-        for key, combo in self.combos.items(): state.settings.setValue(key, combo.currentData())
         state.settings.setValue("touchButton1X", self.t1x.text())
         state.settings.setValue("touchButton1Y", self.t1y.text())
         state.settings.setValue("touchButton2X", self.t2x.text())
         state.settings.setValue("touchButton2Y", self.t2y.text())
         self.hide()
 
+class CalibrationState:
+    IDLE = 0
+    WAIT_TOP = 1
+    WAIT_TRANSITION_1 = 2
+    WAIT_BOTTOM = 3
+    DONE = 4
+
+class CalibrationManager:
+    def __init__(self, signals):
+        self.state = CalibrationState.IDLE
+        self.signals = signals
+        self.timer = 0
+        self.found_top = None
+        self.found_bottom = None
+        
+        # Stability tracking
+        self.stable_rect = None
+        self.stable_count = 0
+        self.REQUIRED_STABILITY = 5 # Number of frames to stay stable
+        self.current_candidate = None
+        self.marker_dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
+        self.detector_params = cv2.aruco.DetectorParameters()
+        if hasattr(cv2.aruco, "CORNER_REFINE_APRILTAG"):
+            self.detector_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
+        self.marker_detector = cv2.aruco.ArucoDetector(self.marker_dictionary, self.detector_params)
+    
+    def start(self):
+        self.state = CalibrationState.WAIT_TOP
+        self.found_top = None
+        self.found_bottom = None
+        self.stable_rect = None
+        self.stable_count = 0
+        self.current_candidate = None
+        self.signals.status_update.emit("Calib: Show AprilTag 0 on Top Screen")
+
+    def process(self, frame):
+        if self.state == CalibrationState.IDLE or self.state == CalibrationState.DONE:
+            return None
+
+        current_time = time.time()
+        if self.state == CalibrationState.WAIT_TOP:
+            rect = self.find_marker_screen(frame, TOP_CALIB_TAG_ID, TOP_TARGET)
+            self.current_candidate = rect
+            if rect is not None:
+                if self.check_stability(rect):
+                    self.found_top = rect
+                    self.signals.status_update.emit("Top Found! Sending Input...")
+                    self.send_a_press()
+                    self.timer = current_time
+                    self.state = CalibrationState.WAIT_TRANSITION_1
+                    self.reset_stability()
+            else:
+                self.reset_stability()
+        
+        elif self.state == CalibrationState.WAIT_TRANSITION_1:
+            if current_time - self.timer > 2.0: # Wait 2s for 3DS to switch
+                self.signals.status_update.emit("Calib: Show AprilTag 1 on Bottom Screen")
+                self.state = CalibrationState.WAIT_BOTTOM
+        
+        elif self.state == CalibrationState.WAIT_BOTTOM:
+            rect = self.find_marker_screen(frame, BOTTOM_CALIB_TAG_ID, BOTTOM_TARGET)
+            self.current_candidate = rect
+            if rect is not None:
+                # Check overlap with top to avoid re-detecting same screen
+                if not self.is_overlapping(rect, self.found_top):
+                    if self.check_stability(rect):
+                        self.found_bottom = rect
+                        self.signals.status_update.emit("Bottom Found! Finishing...")
+                        self.send_select_press()
+                        self.state = CalibrationState.DONE
+                        self.reset_stability()
+                        return [self.found_top, self.found_bottom]
+                else:
+                    self.reset_stability()
+            else:
+                self.reset_stability()
+        
+        return None
+
+    def check_stability(self, new_rect):
+        if self.stable_rect is None:
+            self.stable_rect = new_rect
+            self.stable_count = 1
+            return False
+        
+        # Compare centers
+        c_old = np.mean(self.stable_rect, axis=0)
+        c_new = np.mean(new_rect, axis=0)
+        if np.linalg.norm(c_old - c_new) < 30: # Within 30 pixels
+            self.stable_count += 1
+            if self.stable_count >= self.REQUIRED_STABILITY:
+                return True
+        else:
+            self.stable_rect = new_rect
+            self.stable_count = 1
+        return False
+
+    def reset_stability(self):
+        self.stable_rect = None
+        self.stable_count = 0
+
+    def get_marker_rect(self, screen_size):
+        screen_w, screen_h = screen_size
+        marker_size = min(CALIB_TAG_SIZE, screen_w, screen_h - (CALIB_TAG_MARGIN_Y * 2))
+        marker_x = (screen_w - marker_size) / 2.0
+        marker_y = (screen_h - marker_size) / 2.0
+        return np.array([
+            [marker_x, marker_y],
+            [marker_x + marker_size, marker_y],
+            [marker_x + marker_size, marker_y + marker_size],
+            [marker_x, marker_y + marker_size],
+        ], dtype=np.float32)
+
+    def find_marker_screen(self, frame, marker_id, screen_size):
+        corners, ids, _ = self.marker_detector.detectMarkers(frame)
+        if ids is None:
+            return None
+
+        ids = ids.flatten()
+        for detected_id, detected_corners in zip(ids, corners):
+            if int(detected_id) != marker_id:
+                continue
+            marker_quad = detected_corners.reshape(4, 2).astype(np.float32)
+            marker_rect = self.get_marker_rect(screen_size)
+            screen_rect = np.array([
+                [0, 0],
+                [screen_size[0] - 1, 0],
+                [screen_size[0] - 1, screen_size[1] - 1],
+                [0, screen_size[1] - 1],
+            ], dtype=np.float32)
+            transform = cv2.getPerspectiveTransform(marker_rect, marker_quad)
+            return cv2.perspectiveTransform(screen_rect.reshape(1, 4, 2), transform)[0]
+
+        return None
+
+    def is_overlapping(self, rect1, rect2):
+        # Simple center point distance check
+        c1 = np.mean(rect1, axis=0)
+        c2 = np.mean(rect2, axis=0)
+        dist = np.linalg.norm(c1 - c2)
+        return dist < 50 # If centers are close, assume same screen
+
+    def send_a_press(self):
+        # Send A press
+        # HID format: <IIIII
+        # hidPad (0xFFF default). A is bit 0. Clear bit 0 to press.
+        packet_press = struct.pack('<IIIII', 0xffe, 0x2000000, 0x7ff7ff, 0x80800081, 0)
+        send_packet(packet_press)
+        
+        # Schedule release after 100ms
+        time.sleep(0.1)
+        send_packet(get_release_packet())
+
+    def send_select_press(self):
+        # Send Select press
+        # Select is Bit 2 (1 << 2 = 4)
+        # 0xFFF & ~4 = 0xFFB
+        packet_press = struct.pack('<IIIII', 0xffb, 0x2000000, 0x7ff7ff, 0x80800081, 0)
+        send_packet(packet_press)
+        
+        time.sleep(0.1)
+        send_packet(get_release_packet())
+
 class AppWindow(QMainWindow):
     def __init__(self):
+        # print("DEBUG: AppWindow init start") # Debugs removed
         super().__init__()
         self.signals = CameraSignals()
         state.settings = QSettings("cylin_TW", "3DSC2")
         self.setup_variables()
         self.setup_ui()
-        self.setup_connections()
         self.gamepad_monitor = GamepadMonitor(self)
+        self.calibration_manager = CalibrationManager(self.signals)
+        self.ai_manager = AIManager()
+        self.setup_connections()
         
         state.heartbeat_running = True
         self.heartbeat_thread = threading.Thread(target=self.heartbeat_loop, daemon=True)
@@ -344,15 +818,29 @@ class AppWindow(QMainWindow):
         self.cap = None
         self.camera_thread = None
         self.windows_created = False
+        self.sampling_color = False
+        self.roi_locked = False
+        self.touch_calibration_active = False
+        self.touch_calibration_samples = []
+        self.touch_calibration_auto = False
+        self.touch_calibration_running = False
+        self.touch_calibration_thread = None
+        self.combined_view = False
         
         state.ipAddress = state.settings.value("ipAddress", "")
         state.yAxisMultiplier = -1 if state.settings.value("invertY", False, type=bool) else 1
         state.abInverse = state.settings.value("invertAB", False, type=bool)    
         state.xyInverse = state.settings.value("invertXY", False, type=bool)
+        touch_matrix_json = state.settings.value("touchCalibrationMatrix", "")
+        if touch_matrix_json:
+            try:
+                state.touch_calibration_matrix = np.array(json.loads(touch_matrix_json), dtype=np.float32)
+            except Exception:
+                state.touch_calibration_matrix = None
 
     def setup_ui(self):
         self.setWindowTitle("3DSC2")
-        self.setMinimumSize(600, 600)
+        self.setMinimumSize(600, 750)
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -362,6 +850,9 @@ class AppWindow(QMainWindow):
         self.camera_combo = QComboBox()
         self.camera_combo.addItems([f"Camera {i}" for i in range(8)])
         cam_layout.addRow("Camera:", self.camera_combo)
+        self.url_edit = QLineEdit(state.settings.value("camUrl", ""))
+        self.url_edit.setPlaceholderText("http://192.168.x.x:4747/video")
+        cam_layout.addRow("IP Cam URL:", self.url_edit)
         self.ip_edit = QLineEdit(state.ipAddress)
         cam_layout.addRow("3DS IP:", self.ip_edit)
         layout.addWidget(cam_group)
@@ -370,9 +861,13 @@ class AppWindow(QMainWindow):
         self.start_btn = QPushButton("Start Camera")
         self.stop_btn = QPushButton("Stop Camera")
         self.stop_btn.setEnabled(False)
+        self.remote_btn = QPushButton("Start Remote Server")
+        self.auto_calib_btn = QPushButton("Auto Calibrate")
         self.reset_btn = QPushButton("Reset ROIs")
         self.config_btn = QPushButton("Button Config")
         btn_layout.addWidget(self.start_btn); btn_layout.addWidget(self.stop_btn)
+        btn_layout.addWidget(self.remote_btn)
+        btn_layout.addWidget(self.auto_calib_btn)
         btn_layout.addWidget(self.reset_btn); btn_layout.addWidget(self.config_btn)
         layout.addLayout(btn_layout)
 
@@ -386,6 +881,51 @@ class AppWindow(QMainWindow):
         tas_layout.addWidget(self.save_tas_btn); tas_layout.addWidget(self.load_tas_btn)
         layout.addWidget(tas_group)
 
+        ai_group = QGroupBox("Behavior Cloning (AI)")
+        ai_layout = QHBoxLayout(ai_group)
+        self.ai_record_btn = QPushButton("Record Expert")
+        self.ai_train_btn = QPushButton("Train Model")
+        self.ai_reset_btn = QPushButton("Clear Data")
+        self.ai_enable_btn = QPushButton("Enable AI Agent")
+        self.ai_enable_btn.setCheckable(True)
+        ai_layout.addWidget(self.ai_record_btn)
+        ai_layout.addWidget(self.ai_train_btn)
+        ai_layout.addWidget(self.ai_reset_btn)
+        ai_layout.addWidget(self.ai_enable_btn)
+        layout.addWidget(ai_group)
+
+        # Calibration Adjustments
+        cal_group = QGroupBox("Calibration Settings")
+        cal_layout = QVBoxLayout(cal_group)
+        
+        self.pick_color_btn = QPushButton("Sample Color Fallback")
+        self.lock_roi_checkbox = QCheckBox("Lock ROIs")
+        self.touch_calib_btn = QPushButton("Calibrate Touch")
+        self.touch_calib_auto_cb = QCheckBox("Auto Touch Calib")
+        self.touch_calib_auto_cb.setChecked(self.touch_calibration_auto)
+        self.reset_touch_calib_btn = QPushButton("Reset Touch Cal")
+        
+        tol_layout = QHBoxLayout()
+        self.tol_slider = QSlider(Qt.Orientation.Horizontal)
+        self.tol_slider.setRange(5, 50)
+        self.tol_slider.setValue(state.hsv_tolerance)
+        tol_layout.addWidget(QLabel("Tolerance:")); tol_layout.addWidget(self.tol_slider)
+        
+        self.mask_checkbox = QCheckBox("Show Calibration Mask")
+        self.mask_checkbox.setChecked(state.show_mask)
+        self.combined_view_cb = QCheckBox("Combined View")
+        self.combined_view_cb.setChecked(self.combined_view)
+        
+        cal_layout.addWidget(self.pick_color_btn)
+        cal_layout.addWidget(self.lock_roi_checkbox)
+        cal_layout.addWidget(self.touch_calib_btn)
+        cal_layout.addWidget(self.touch_calib_auto_cb)
+        cal_layout.addWidget(self.reset_touch_calib_btn)
+        cal_layout.addLayout(tol_layout)
+        cal_layout.addWidget(self.mask_checkbox)
+        cal_layout.addWidget(self.combined_view_cb)
+        layout.addWidget(cal_group)
+
         inv_layout = QHBoxLayout()
         self.inv_y = QCheckBox("Invert Y"); self.inv_y.setChecked(state.yAxisMultiplier == -1)
         self.inv_ab = QCheckBox("Invert A-B"); self.inv_ab.setChecked(state.abInverse)
@@ -395,7 +935,10 @@ class AppWindow(QMainWindow):
 
         self.status_label = QLabel("Ready")
         layout.addWidget(self.status_label)
-        self.instr = QTextEdit("1. Set the IP of your 3DS. 2. Click the start camera. 3. select ROIs (4 pts each screen). 4. Enjoy!")
+        self.instr = QTextEdit(
+            "1. Set 3DS IP. 2. Start camera. 3. For auto calibration, run calibration client on 3DS and click Auto Calibrate. "
+            "4. Manual ROI selection still works by clicking 4 corners per screen."
+        )
         self.instr.setReadOnly(True); self.instr.setMaximumHeight(80)
         layout.addWidget(self.instr)
         
@@ -407,6 +950,8 @@ class AppWindow(QMainWindow):
     def setup_connections(self):
         self.start_btn.clicked.connect(self.start_camera)
         self.stop_btn.clicked.connect(self.stop_camera)
+        self.remote_btn.clicked.connect(self.start_remote_server)
+        self.auto_calib_btn.clicked.connect(self.start_interactive_calibration)
         self.reset_btn.clicked.connect(self.reset_rois)
         self.config_btn.clicked.connect(self.remap_dlg.show)
         self.ip_edit.textChanged.connect(self.update_ip)
@@ -419,8 +964,47 @@ class AppWindow(QMainWindow):
         self.save_tas_btn.clicked.connect(self.save_tas)
         self.load_tas_btn.clicked.connect(self.load_tas)
 
+        self.ai_record_btn.clicked.connect(self.toggle_ai_record)
+        self.ai_train_btn.clicked.connect(self.ai_manager.train)
+        self.ai_reset_btn.clicked.connect(self.ai_manager.reset_data)
+        self.ai_enable_btn.toggled.connect(self.toggle_ai_active)
+
+        # Calibration Adjustments
+        self.pick_color_btn.clicked.connect(self.start_sampling_color)
+        self.lock_roi_checkbox.stateChanged.connect(self.toggle_roi_lock)
+        self.touch_calib_btn.clicked.connect(self.start_touch_calibration)
+        self.touch_calib_auto_cb.stateChanged.connect(self.toggle_touch_auto)
+        self.reset_touch_calib_btn.clicked.connect(self.reset_touch_calibration)
+        self.tol_slider.valueChanged.connect(self.update_tolerance)
+        self.mask_checkbox.toggled.connect(self.toggle_mask_view)
+
         self.signals.status_update.connect(self.status_label.setText)
         self.signals.error_occurred.connect(lambda m: QMessageBox.critical(self, "Error", m))
+        self.ai_manager.status_update.connect(self.status_label.setText)
+
+    def toggle_ai_record(self):
+        recording = self.ai_manager.toggle_recording()
+        self.ai_record_btn.setText("Stop Recording" if recording else "Record Expert")
+        
+    def toggle_ai_active(self, checked):
+        state.ai_controlled = checked
+        if checked:
+            success = self.ai_manager.toggle_active()
+            if not success:
+                self.ai_enable_btn.setChecked(False)
+                state.ai_controlled = False
+            else:
+                self.status_label.setText("AI Agent Active")
+        else:
+            self.ai_manager.is_active = False
+            self.status_label.setText("AI Agent Disabled")
+
+    def toggle_roi_lock(self, s):
+        self.roi_locked = (s != 0)
+        self.status_label.setText("ROIs Locked" if self.roi_locked else "ROIs Unlocked")
+
+    def toggle_touch_auto(self, s):
+        self.touch_calibration_auto = (s != 0)
 
     def update_ip(self, t): 
         state.ipAddress = t
@@ -433,6 +1017,123 @@ class AppWindow(QMainWindow):
         state.settings.setValue("invertY", self.inv_y.isChecked())
         state.settings.setValue("invertAB", self.inv_ab.isChecked())
         state.settings.setValue("invertXY", self.inv_xy.isChecked())
+
+    def start_sampling_color(self):
+        self.sampling_color = True
+        self.status_label.setText("Click screen area in 'ROI Selector' for fallback color sample")
+
+    def start_touch_calibration(self):
+        if len(self.screens) < 2:
+            self.signals.error_occurred.emit("Need bottom screen visible first!")
+            return
+        self.touch_calibration_active = True
+        self.touch_calibration_samples = []
+        state.touchScreenPressed = False
+        if self.touch_calibration_auto:
+            if self.touch_calibration_running:
+                return
+            self.touch_calibration_running = True
+            self.status_label.setText("Touch calib auto-running via InputRedirection")
+            self.touch_calibration_thread = threading.Thread(
+                target=self.run_touch_calibration_auto,
+                daemon=True,
+            )
+            self.touch_calibration_thread.start()
+        else:
+            label, target = TOUCH_CALIBRATION_TARGETS[0]
+            self.status_label.setText(
+                f"Touch Cal 1/{len(TOUCH_CALIBRATION_TARGETS)}: show target 0 on 3DS, click it here, then press A on 3DS for next"
+            )
+
+    def send_tap_packet(self, x, y, press_ms=AUTO_TOUCH_TAP_MS):
+        max_tx = TOUCH_SCREEN_WIDTH - 1
+        max_ty = TOUCH_SCREEN_HEIGHT - 1
+        tx = max(0, min(int(x), max_tx))
+        ty = max(0, min(int(y), max_ty))
+        packet_press = struct.pack(
+            '<IIIII',
+            0xffe,
+            (1 << 24) | (int(round(0xfff * ty / max_ty)) << 12) | int(round(0xfff * tx / max_tx)),
+            0x7ff7ff,
+            0x80800081,
+            0,
+        )
+        send_packet(packet_press)
+        time.sleep(press_ms / 1000.0)
+        send_packet(get_release_packet())
+
+    def run_touch_calibration_auto(self):
+        try:
+            # Auto run: 3DS client advances with InputRedirection A presses.
+            # Touch taps use known target coords so no human click needed.
+            for idx, (_, target) in enumerate(TOUCH_CALIBRATION_TARGETS):
+                self.signals.status_update.emit(
+                    f"Touch Cal {idx+1}/{len(TOUCH_CALIBRATION_TARGETS)}: auto tap target {idx}"
+                )
+                self.send_tap_packet(target[0], target[1])
+                self.send_a_press()
+                self.touch_calibration_samples.append(target)
+                time.sleep(AUTO_TOUCH_GAP_MS / 1000.0)
+
+            self.finish_touch_calibration(auto=True)
+        finally:
+            self.touch_calibration_running = False
+
+    def finish_touch_calibration(self, auto=False):
+        if auto:
+            # Auto mode has no external observation, so it validates input path
+            # and saves identity mapping for the already-warped bottom preview.
+            state.touch_calibration_matrix = np.eye(3, dtype=np.float32)
+        else:
+            src = np.array(self.touch_calibration_samples, dtype=np.float32)
+            dst = np.array([target for _, target in TOUCH_CALIBRATION_TARGETS], dtype=np.float32)
+            matrix, _ = cv2.findHomography(src, dst, 0)
+            if matrix is None:
+                self.signals.error_occurred.emit("Touch calibration failed")
+                self.touch_calibration_active = False
+                self.touch_calibration_samples = []
+                return
+            state.touch_calibration_matrix = matrix.astype(np.float32)
+
+        state.settings.setValue("touchCalibrationMatrix", json.dumps(state.touch_calibration_matrix.tolist()))
+        self.touch_calibration_active = False
+        self.touch_calibration_samples = []
+        self.status_label.setText("Touch calibration saved")
+
+    def reset_touch_calibration(self):
+        state.touch_calibration_matrix = None
+        state.settings.remove("touchCalibrationMatrix")
+        self.touch_calibration_active = False
+        self.touch_calibration_samples = []
+        self.status_label.setText("Touch calibration reset")
+
+    def update_tolerance(self, val):
+        state.hsv_tolerance = val
+        update_sampled_color_model({
+            "hsv_mean": np.array(state.last_sampled_hsv, dtype=np.float32),
+            "hsv_std": np.array(state.sampled_hsv_std, dtype=np.float32),
+            "exg_mean": state.sampled_exg_mean,
+            "exg_std": state.sampled_exg_std,
+        })
+
+    def toggle_mask_view(self, checked):
+        state.show_mask = checked
+
+    def toggle_combined(self, checked):
+        self.combined_view = checked
+        if not checked:
+            try: cv2.destroyWindow("3DS Combined")
+            except: pass
+            self.create_opencv_windows()
+        else:
+            try: cv2.destroyWindow("Top Screen")
+            except: pass
+            try: cv2.destroyWindow("Bottom Screen")
+            except: pass
+            cv2.namedWindow("3DS Combined", cv2.WINDOW_NORMAL)
+            cv2.setMouseCallback("3DS Combined", self.mouse_touch_callback)
+            # Default size for combined
+            cv2.resizeWindow("3DS Combined", 400, 480)
 
     def toggle_record(self):
         if not state.is_recording:
@@ -501,12 +1202,13 @@ class AppWindow(QMainWindow):
             self.signals.status_update.emit(f"Loaded {len(state.tas_frames)} frames")
 
     def camera_worker(self):
-        try: self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except: pass
         while self.running:
-            ret, frame = self.cap.read()
-            if not ret: time.sleep(0.01); continue
-            with self.frame_lock: self.latest_frame = frame.copy()
+            ret, frame = self.threaded_cap.read()
+            if not ret or frame is None:
+                time.sleep(0.01)
+                continue
+            with self.frame_lock:
+                self.latest_frame = frame.copy()
 
     def create_opencv_windows(self):
         if not self.windows_created:
@@ -525,25 +1227,91 @@ class AppWindow(QMainWindow):
 
     def mouse_roi_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
+            if self.roi_locked or len(self.screens) >= 2:
+                return
+
+            if self.sampling_color:
+                with self.frame_lock:
+                    if self.latest_frame is not None:
+                        h, w = self.latest_frame.shape[:2]
+                        x_clamped = max(0, min(w-1, x))
+                        y_clamped = max(0, min(h-1, y))
+                        sample = sample_screen_color(self.latest_frame, x_clamped, y_clamped)
+                        update_sampled_color_model(sample)
+                        self.sampling_color = False
+                        self.status_label.setText(
+                            f"Sampled patch HSV: {state.last_sampled_hsv}, std: "
+                            f"{[int(round(v)) for v in state.sampled_hsv_std]}"
+                        )
+                return
+
             self.roi_points.append([x, y])
             self.all_points.append((x, y))
             if len(self.roi_points) == 4:
                 self.screens.append(np.array(self.roi_points, dtype=np.float32).reshape(4, 2))
                 self.roi_points = []
                 self.signals.status_update.emit(f"ROI {len(self.screens)} selected")
+                if len(self.screens) >= 2:
+                    self.roi_locked = True
+                    self.lock_roi_checkbox.setChecked(True)
+                    self.signals.status_update.emit("ROIs complete. Locked.")
 
     def mouse_touch_callback(self, event, x, y, flags, param):
-        # Dynamically scale window coordinates to 320x240 for 3DS packet
+        # Scale window coordinates to touch screen resolution
         try:
-            rect = cv2.getWindowImageRect("Bottom Screen")
-            if rect and rect[2] > 0 and rect[3] > 0:
-                win_w, win_h = rect[2], rect[3]
-                scaled_x = int(x * (TOUCH_SCREEN_WIDTH / win_w))
-                scaled_y = int(y * (TOUCH_SCREEN_HEIGHT / win_h))
+            if self.combined_view:
+                rect = cv2.getWindowImageRect("3DS Combined")
+                if rect[2] > 0 and rect[3] > 0:
+                    # Bottom screen is at the bottom half of the combined view
+                    # Top is (400, 240), Bottom is (320, 240)
+                    # Combined canvas is (400, 480)
+                    # We need to scale relative to the bottom 320x240 patch centered at bottom half
+                    
+                    # Effective width of top screen in window
+                    win_w = rect[2]
+                    win_h = rect[3]
+                    
+                    # Combined view logic: Top (400x240), Bottom (320x240) centered below
+                    # x_offset = (400 - 320) // 2 = 40
+                    # y_offset = 240
+                    
+                    # Convert window x, y to canvas coordinates (400, 480)
+                    canvas_x = x * 400 / win_w
+                    canvas_y = y * 480 / win_h
+                    
+                    raw_x = int((canvas_x - 40) * TOUCH_SCREEN_WIDTH / 320)
+                    raw_y = int((canvas_y - 240) * TOUCH_SCREEN_HEIGHT / 240)
+                else:
+                    raw_x, raw_y = x, y
             else:
-                scaled_x, scaled_y = x, y
+                rect = cv2.getWindowImageRect("Bottom Screen")
+                if rect[2] > 0 and rect[3] > 0:
+                    raw_x = int(x * TOUCH_SCREEN_WIDTH / rect[2])
+                    raw_y = int(y * TOUCH_SCREEN_HEIGHT / rect[3])
+                else:
+                    raw_x, raw_y = x, y
         except:
-            scaled_x, scaled_y = x, y
+            raw_x, raw_y = x, y
+
+        raw_x = max(0, min(int(raw_x), TOUCH_SCREEN_WIDTH - 1))
+        raw_y = max(0, min(int(raw_y), TOUCH_SCREEN_HEIGHT - 1))
+
+        if self.touch_calibration_active and self.touch_calibration_auto and self.touch_calibration_running:
+            return
+
+        if self.touch_calibration_active and event == cv2.EVENT_LBUTTONDOWN:
+            self.touch_calibration_samples.append((raw_x, raw_y))
+            if len(self.touch_calibration_samples) >= len(TOUCH_CALIBRATION_TARGETS):
+                self.finish_touch_calibration()
+            else:
+                idx = len(self.touch_calibration_samples)
+                label, target = TOUCH_CALIBRATION_TARGETS[idx]
+                self.status_label.setText(
+                    f"Touch Cal {idx+1}/{len(TOUCH_CALIBRATION_TARGETS)}: click target {idx} on Bottom Screen window"
+                )
+            return
+
+        scaled_x, scaled_y = apply_touch_calibration((raw_x, raw_y))
 
         if event == cv2.EVENT_LBUTTONDOWN:
             state.touchScreenPressed = True
@@ -553,14 +1321,46 @@ class AppWindow(QMainWindow):
         elif event == cv2.EVENT_LBUTTONUP:
             state.touchScreenPressed = False
 
+    def get_local_ip(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        except:
+            ip = "127.0.0.1"
+        finally:
+            s.close()
+        return ip
+
+    def start_remote_server(self):
+        ip = self.get_local_ip()
+        self.remote_server = RemoteCamServer(self)
+        self.remote_server.start()
+        self.remote_btn.setEnabled(False)
+        self.url_edit.setText(f"http://{ip}:5000")
+        self.status_label.setText(f"Server at: http://{ip}:5000")
+        QMessageBox.information(self, "Remote Cam", f"Open this URL on your iPhone:\nhttp://{ip}:5000")
+        
+        # We also need to start the display loop
+        self.running = True
+        self.display_timer = QTimer()
+        self.display_timer.timeout.connect(self.update_display)
+        self.display_timer.start(33)
+        self.stop_btn.setEnabled(True)
+
     def start_camera(self):
-        idx = self.camera_combo.currentIndex()
-        self.cap = cv2.VideoCapture(idx)
-        if not self.cap.isOpened():
-            self.signals.error_occurred.emit("Cannot open camera")
+        url = self.url_edit.text().strip()
+        if url:
+            source = url
+            state.settings.setValue("camUrl", url)
+        else:
+            source = self.camera_combo.currentIndex()
+        
+        self.threaded_cap = ThreadedCamera(source)
+        if not self.threaded_cap.cap.isOpened():
+            self.signals.error_occurred.emit(f"Cannot open: {source}")
             return
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_height)
+        
         self.running = True
         self.camera_thread = threading.Thread(target=self.camera_worker, daemon=True)
         self.camera_thread.start()
@@ -574,18 +1374,58 @@ class AppWindow(QMainWindow):
         self.running = False
         if hasattr(self, 'display_timer'): self.display_timer.stop()
         if self.camera_thread: self.camera_thread.join(timeout=1.0)
-        if self.cap: self.cap.release()
+        if hasattr(self, 'threaded_cap'): self.threaded_cap.stop()
         cv2.destroyAllWindows(); self.windows_created = False
         self.start_btn.setEnabled(True); self.stop_btn.setEnabled(False)
 
     def reset_rois(self):
         self.screens.clear(); self.all_points.clear(); self.roi_points.clear()
+        self.roi_locked = False
+        self.lock_roi_checkbox.setChecked(False)
+        self.signals.status_update.emit("ROIs Reset & Unlocked")
+
+    def start_interactive_calibration(self):
+        if self.latest_frame is None:
+            self.signals.error_occurred.emit("Start camera first!")
+            return
+        if not state.ipAddress:
+            self.signals.error_occurred.emit("Set 3DS IP address first!")
+            return
+        self.roi_points.clear()
+        self.signals.status_update.emit("Run calibration client on 3DS, then show tag 0 / tag 1 as prompted")
+        self.calibration_manager.start()
 
     def update_display(self):
         with self.frame_lock: frame = self.latest_frame.copy() if self.latest_frame is not None else None
         if frame is None: return
         
+        # Run calibration logic
+        new_screens = self.calibration_manager.process(frame)
+        if new_screens:
+            self.screens = new_screens
+            self.roi_locked = True
+            self.lock_roi_checkbox.setChecked(True)
+            self.all_points = []
+            for screen in self.screens:
+                for pt in screen:
+                    self.all_points.append(tuple(pt.astype(int)))
+            self.signals.status_update.emit("Calibration Complete! ROIs Locked.")
+
         display = frame.copy()
+        
+        # Real-time mask feedback
+        if state.show_mask:
+            mask = build_calibration_mask(frame)
+            display = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+        # Visual feedback for calibration
+        if self.calibration_manager.state != CalibrationState.IDLE and self.calibration_manager.state != CalibrationState.DONE:
+             cv2.putText(display, "CALIBRATING: Follow instructions", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+             if self.calibration_manager.current_candidate is not None:
+                 pts = self.calibration_manager.current_candidate.astype(int)
+                 cv2.polylines(display, [pts], True, (0, 255, 255), 2)
+                 cv2.putText(display, f"Stability: {self.calibration_manager.stable_count}/5", (50, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
         for pt in self.all_points: cv2.circle(display, pt, 6, (0, 255, 0), -1)
         if len(self.roi_points) > 1:
             for i in range(1, len(self.roi_points)):
@@ -593,15 +1433,69 @@ class AppWindow(QMainWindow):
 
         if len(self.screens) >= 1:
             top = self.warp_to_target(frame, self.screens[0], self.top_target)
-            cv2.imshow("Top Screen", top)
+            if not self.combined_view:
+                cv2.imshow("Top Screen", top)
+            
+            # AI Logic
+            if self.ai_manager.is_recording:
+                self.ai_manager.add_sample(top, [state.lx, state.ly, state.rx, state.ry], state.buttons)
+            
+            if state.ai_controlled and self.ai_manager.is_active:
+                axes, buttons = self.ai_manager.predict(top)
+                if axes is not None:
+                    state.lx, state.ly, state.rx, state.ry = axes
+                    state.buttons = int(buttons)
 
         if len(self.screens) >= 2:
             bottom = self.warp_to_target(frame, self.screens[1], self.bottom_target)
-            cv2.imshow("Bottom Screen", bottom)
+            
+            if self.combined_view:
+                # Top (400, 240), Bottom (320, 240)
+                # Create a black canvas (480, 400) - Height x Width
+                combined = np.zeros((480, 400, 3), dtype=np.uint8)
+                combined[0:240, 0:400] = top
+                # Center bottom: x_offset = (400 - 320) // 2 = 40
+                combined[240:480, 40:360] = bottom
+                
+                if self.touch_calibration_active:
+                    for idx, (_, target) in enumerate(TOUCH_CALIBRATION_TARGETS):
+                        color = (0, 255, 255) if idx == len(self.touch_calibration_samples) else (255, 255, 0)
+                        # Offset target by (40, 240)
+                        draw_target = (target[0] + 40, target[1] + 240)
+                        cv2.circle(combined, draw_target, 7, color, 2)
+                
+                if state.touchScreenPressed:
+                    # Offset touch by (40, 240) for drawing
+                    draw_touch = (state.touchScreenPosition.x() + 40, state.touchScreenPosition.y() + 240)
+                    cv2.circle(combined, draw_touch, 6, (0, 0, 255), -1)
+                
+                cv2.imshow("3DS Combined", combined)
+            else:
+                if self.touch_calibration_active:
+                    for idx, (_, target) in enumerate(TOUCH_CALIBRATION_TARGETS):
+                        color = (0, 255, 255) if idx == len(self.touch_calibration_samples) else (255, 255, 0)
+                        cv2.circle(bottom, target, 7, color, 2)
+                    for sample in self.touch_calibration_samples:
+                        cv2.circle(bottom, sample, 5, (0, 255, 0), -1)
+                if state.touchScreenPressed:
+                    cv2.circle(
+                        bottom,
+                        (state.touchScreenPosition.x(), state.touchScreenPosition.y()),
+                        6,
+                        (0, 0, 255),
+                        -1
+                    )
+                cv2.imshow("Bottom Screen", bottom)
 
-        self.fps_label.setText(f"FPS: {self.cap.get(cv2.CAP_PROP_FPS):.1f}")
+        if hasattr(self, 'threaded_cap') and self.threaded_cap:
+            fps = self.threaded_cap.cap.get(cv2.CAP_PROP_FPS)
+            self.fps_label.setText(f"FPS: {fps:.1f}")
+        else:
+            self.fps_label.setText("FPS: --")
+            
         cv2.imshow("ROI Selector", display)
         cv2.waitKey(1)
+
 
     def warp_to_target(self, image, pts, target_size):
         rect = np.zeros((4, 2), dtype="float32")
@@ -619,7 +1513,9 @@ class AppWindow(QMainWindow):
         e.accept()
 
 def main():
+    print("DEBUG: Entering main")
     app = QApplication(sys.argv)
+    print("DEBUG: QApplication created")
     style = """
     QWidget { background-color: #1e1e1e; color: #e0e0e0; font-family: sans-serif; }
     QLineEdit, QComboBox, QTextEdit { background-color: #2d2d2d; border: 1px solid #3d3d3d; border-radius: 4px; color: #fff; padding: 4px; }
@@ -629,8 +1525,11 @@ def main():
     QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #aaa; }
     """
     app.setStyleSheet(style)
+    print("DEBUG: Style set")
     win = AppWindow()
+    print("DEBUG: Window created")
     win.show()
+    print("DEBUG: Window shown, starting exec")
     sys.exit(app.exec())
 
 if __name__ == "__main__":

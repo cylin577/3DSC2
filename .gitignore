@@ -1,7 +1,32 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .venv/
-.gemini/
-data/
-models/
+.env
+build/
+dist/
+*.egg-info/
+
+# 3DS / C Build Artifacts
+calibration_client/build/
+remote_build/
+remote_build.sh
+*.3dsx
+*.elf
+*.smdh
+
+# AI Model Artifacts
+*.pth
+
+# IDEs
+.vscode/
+.idea/
+
+# Local agentsi Memory
+.agents/
+.codex/
+
 GEMINI.md
+AGENTS.md
+CLAUDE.md
