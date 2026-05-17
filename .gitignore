@@ -14,7 +14,10 @@ remote_build/
 remote_build.sh
 *.3dsx
 *.elf
+*.cia
 *.smdh
+banner.bin
+icon.bin
 
 # AI Model Artifacts
 *.pth
@@ -23,12 +26,9 @@ remote_build.sh
 .vscode/
 .idea/
 
-# Local agentsi Memory
+# Local Memory
 .agents/
 .codex/
 
 GEMINI.md
 AGENTS.md
-CLAUDE.md
-
-

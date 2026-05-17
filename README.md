@@ -39,21 +39,26 @@ This project uses **uv** for seamless dependency management.
 3. Setup & Calibration
    - Enter your **3DS IP Address**.
    - Select your camera from the dropdown and click **Start Camera**.
-   - **Calibrate ROIs:** In the "ROI Selector" window, click the 4 corners of your **Top Screen**, followed by the 4 corners of your **Bottom Screen**.
-   - The Top and Bottom screens will appear in separate, resizable windows.
+   - **Auto Calibration (Recommended):**
+     1. Run the `3dsc2_calib` homebrew app on your 3DS.
+     2. Click **Auto Calibrate** in the PC app.
+     3. Follow the instructions: Show **AprilTag 0** on the Top Screen, then press `A` on the 3DS to show **AprilTag 1** on the Bottom Screen.
+     4. The app will automatically detect and lock the ROIs.
+   - **Manual Calibration:** If auto-calibration fails, click 4 corners of your **Top Screen**, followed by 4 corners of your **Bottom Screen** in the "ROI Selector" window. Click **Lock ROIs** once finished.
+   - The Top and Bottom screens will appear in separate (or combined) resizable windows.
 
 4. Interaction & TAS
-   - **Touch Control:** Click or drag directly on the **Bottom Screen** window to control the 3DS touch screen. The input scales automatically with window size.
-   - **Gamepad:** Connect a controller to use physical buttons/sticks.
+   - **Touch Control:** Click or drag directly on the **Bottom Screen** (or combined) window to control the 3DS touch screen.
+   - **Gamepad:** Connect a controller to use physical buttons/sticks. Use **Button Config** to map your controller by recording presses.
    - **Event Replay:** Use the **Record**, **Play**, and **Save/Load Event** buttons to automate or replay your gameplay with 20Hz precision.
 
 That’s it !
 
 ## TODOs
  
- 1. Make a homebrew app for automatic calibration
- 2. Super-Resolution support? (But nothing can't be solved using a 4K camera)
- 3. Stabilized tracking? (Captured screen won't shift around when you play rhythm games)
+ 1. Super-Resolution support? (But nothing can't be solved using a 4K camera)
+ 2. Stabilized tracking? (Captured screen won't shift around when you play rhythm games)
+ 3. Improve AI Agent training efficiency.
 
 ## Contribute
-If you found this project useful, please star this repo, and if you can code, PLEASE help me do some TODOs, because I spend an entire night and still didn't figure out how to do auto calibration
+If you found this project useful, please star this repo! If you can code, feel free to help with the TODOs or suggest new features via Pull Requests.
