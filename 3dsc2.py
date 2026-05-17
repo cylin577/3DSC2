@@ -90,7 +90,6 @@ class GlobalState:
 
     touchScreenPressed = False
     touchScreenPosition = QPoint(0, 0)
-    touch_calibration_matrix = None
     settings = None
     
     # TAS state
@@ -187,19 +186,6 @@ def build_calibration_mask(frame):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     return mask
-
-def apply_touch_calibration(point):
-    if state.touch_calibration_matrix is None:
-        return point
-
-    src = np.array([[[float(point[0]), float(point[1])]]], dtype=np.float32)
-    mapped = cv2.perspectiveTransform(src, state.touch_calibration_matrix)[0][0]
-    x = int(round(mapped[0]))
-    y = int(round(mapped[1]))
-    return (
-        max(0, min(x, TOUCH_SCREEN_WIDTH - 1)),
-        max(0, min(y, TOUCH_SCREEN_HEIGHT - 1)),
-    )
 
 def variant_to_button(val):
     if val is None: return GamepadButtons.ButtonInvalid
@@ -820,23 +806,12 @@ class AppWindow(QMainWindow):
         self.windows_created = False
         self.sampling_color = False
         self.roi_locked = False
-        self.touch_calibration_active = False
-        self.touch_calibration_samples = []
-        self.touch_calibration_auto = False
-        self.touch_calibration_running = False
-        self.touch_calibration_thread = None
         self.combined_view = False
         
         state.ipAddress = state.settings.value("ipAddress", "")
         state.yAxisMultiplier = -1 if state.settings.value("invertY", False, type=bool) else 1
         state.abInverse = state.settings.value("invertAB", False, type=bool)    
         state.xyInverse = state.settings.value("invertXY", False, type=bool)
-        touch_matrix_json = state.settings.value("touchCalibrationMatrix", "")
-        if touch_matrix_json:
-            try:
-                state.touch_calibration_matrix = np.array(json.loads(touch_matrix_json), dtype=np.float32)
-            except Exception:
-                state.touch_calibration_matrix = None
 
     def setup_ui(self):
         self.setWindowTitle("3DSC2")
@@ -900,10 +875,6 @@ class AppWindow(QMainWindow):
         
         self.pick_color_btn = QPushButton("Sample Color Fallback")
         self.lock_roi_checkbox = QCheckBox("Lock ROIs")
-        self.touch_calib_btn = QPushButton("Calibrate Touch")
-        self.touch_calib_auto_cb = QCheckBox("Auto Touch Calib")
-        self.touch_calib_auto_cb.setChecked(self.touch_calibration_auto)
-        self.reset_touch_calib_btn = QPushButton("Reset Touch Cal")
         
         tol_layout = QHBoxLayout()
         self.tol_slider = QSlider(Qt.Orientation.Horizontal)
@@ -918,9 +889,6 @@ class AppWindow(QMainWindow):
         
         cal_layout.addWidget(self.pick_color_btn)
         cal_layout.addWidget(self.lock_roi_checkbox)
-        cal_layout.addWidget(self.touch_calib_btn)
-        cal_layout.addWidget(self.touch_calib_auto_cb)
-        cal_layout.addWidget(self.reset_touch_calib_btn)
         cal_layout.addLayout(tol_layout)
         cal_layout.addWidget(self.mask_checkbox)
         cal_layout.addWidget(self.combined_view_cb)
@@ -1023,89 +991,8 @@ class AppWindow(QMainWindow):
         self.status_label.setText("Click screen area in 'ROI Selector' for fallback color sample")
 
     def start_touch_calibration(self):
-        if len(self.screens) < 2:
-            self.signals.error_occurred.emit("Need bottom screen visible first!")
-            return
-        self.touch_calibration_active = True
-        self.touch_calibration_samples = []
-        state.touchScreenPressed = False
-        if self.touch_calibration_auto:
-            if self.touch_calibration_running:
-                return
-            self.touch_calibration_running = True
-            self.status_label.setText("Touch calib auto-running via InputRedirection")
-            self.touch_calibration_thread = threading.Thread(
-                target=self.run_touch_calibration_auto,
-                daemon=True,
-            )
-            self.touch_calibration_thread.start()
-        else:
-            label, target = TOUCH_CALIBRATION_TARGETS[0]
-            self.status_label.setText(
-                f"Touch Cal 1/{len(TOUCH_CALIBRATION_TARGETS)}: show target 0 on 3DS, click it here, then press A on 3DS for next"
-            )
-
-    def send_tap_packet(self, x, y, press_ms=AUTO_TOUCH_TAP_MS):
-        max_tx = TOUCH_SCREEN_WIDTH - 1
-        max_ty = TOUCH_SCREEN_HEIGHT - 1
-        tx = max(0, min(int(x), max_tx))
-        ty = max(0, min(int(y), max_ty))
-        packet_press = struct.pack(
-            '<IIIII',
-            0xffe,
-            (1 << 24) | (int(round(0xfff * ty / max_ty)) << 12) | int(round(0xfff * tx / max_tx)),
-            0x7ff7ff,
-            0x80800081,
-            0,
-        )
-        send_packet(packet_press)
-        time.sleep(press_ms / 1000.0)
-        send_packet(get_release_packet())
-
-    def run_touch_calibration_auto(self):
-        try:
-            # Auto run: 3DS client advances with InputRedirection A presses.
-            # Touch taps use known target coords so no human click needed.
-            for idx, (_, target) in enumerate(TOUCH_CALIBRATION_TARGETS):
-                self.signals.status_update.emit(
-                    f"Touch Cal {idx+1}/{len(TOUCH_CALIBRATION_TARGETS)}: auto tap target {idx}"
-                )
-                self.send_tap_packet(target[0], target[1])
-                self.send_a_press()
-                self.touch_calibration_samples.append(target)
-                time.sleep(AUTO_TOUCH_GAP_MS / 1000.0)
-
-            self.finish_touch_calibration(auto=True)
-        finally:
-            self.touch_calibration_running = False
-
-    def finish_touch_calibration(self, auto=False):
-        if auto:
-            # Auto mode has no external observation, so it validates input path
-            # and saves identity mapping for the already-warped bottom preview.
-            state.touch_calibration_matrix = np.eye(3, dtype=np.float32)
-        else:
-            src = np.array(self.touch_calibration_samples, dtype=np.float32)
-            dst = np.array([target for _, target in TOUCH_CALIBRATION_TARGETS], dtype=np.float32)
-            matrix, _ = cv2.findHomography(src, dst, 0)
-            if matrix is None:
-                self.signals.error_occurred.emit("Touch calibration failed")
-                self.touch_calibration_active = False
-                self.touch_calibration_samples = []
-                return
-            state.touch_calibration_matrix = matrix.astype(np.float32)
-
-        state.settings.setValue("touchCalibrationMatrix", json.dumps(state.touch_calibration_matrix.tolist()))
-        self.touch_calibration_active = False
-        self.touch_calibration_samples = []
-        self.status_label.setText("Touch calibration saved")
-
-    def reset_touch_calibration(self):
-        state.touch_calibration_matrix = None
-        state.settings.remove("touchCalibrationMatrix")
-        self.touch_calibration_active = False
-        self.touch_calibration_samples = []
-        self.status_label.setText("Touch calibration reset")
+        # Feature removed
+        pass
 
     def update_tolerance(self, val):
         state.hsv_tolerance = val
@@ -1296,28 +1183,11 @@ class AppWindow(QMainWindow):
         raw_x = max(0, min(int(raw_x), TOUCH_SCREEN_WIDTH - 1))
         raw_y = max(0, min(int(raw_y), TOUCH_SCREEN_HEIGHT - 1))
 
-        if self.touch_calibration_active and self.touch_calibration_auto and self.touch_calibration_running:
-            return
-
-        if self.touch_calibration_active and event == cv2.EVENT_LBUTTONDOWN:
-            self.touch_calibration_samples.append((raw_x, raw_y))
-            if len(self.touch_calibration_samples) >= len(TOUCH_CALIBRATION_TARGETS):
-                self.finish_touch_calibration()
-            else:
-                idx = len(self.touch_calibration_samples)
-                label, target = TOUCH_CALIBRATION_TARGETS[idx]
-                self.status_label.setText(
-                    f"Touch Cal {idx+1}/{len(TOUCH_CALIBRATION_TARGETS)}: click target {idx} on Bottom Screen window"
-                )
-            return
-
-        scaled_x, scaled_y = apply_touch_calibration((raw_x, raw_y))
-
         if event == cv2.EVENT_LBUTTONDOWN:
             state.touchScreenPressed = True
-            state.touchScreenPosition = QPoint(scaled_x, scaled_y)
+            state.touchScreenPosition = QPoint(raw_x, raw_y)
         elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
-            state.touchScreenPosition = QPoint(scaled_x, scaled_y)
+            state.touchScreenPosition = QPoint(raw_x, raw_y)
         elif event == cv2.EVENT_LBUTTONUP:
             state.touchScreenPressed = False
 
@@ -1457,13 +1327,6 @@ class AppWindow(QMainWindow):
                 # Center bottom: x_offset = (400 - 320) // 2 = 40
                 combined[240:480, 40:360] = bottom
                 
-                if self.touch_calibration_active:
-                    for idx, (_, target) in enumerate(TOUCH_CALIBRATION_TARGETS):
-                        color = (0, 255, 255) if idx == len(self.touch_calibration_samples) else (255, 255, 0)
-                        # Offset target by (40, 240)
-                        draw_target = (target[0] + 40, target[1] + 240)
-                        cv2.circle(combined, draw_target, 7, color, 2)
-                
                 if state.touchScreenPressed:
                     # Offset touch by (40, 240) for drawing
                     draw_touch = (state.touchScreenPosition.x() + 40, state.touchScreenPosition.y() + 240)
@@ -1471,12 +1334,6 @@ class AppWindow(QMainWindow):
                 
                 cv2.imshow("3DS Combined", combined)
             else:
-                if self.touch_calibration_active:
-                    for idx, (_, target) in enumerate(TOUCH_CALIBRATION_TARGETS):
-                        color = (0, 255, 255) if idx == len(self.touch_calibration_samples) else (255, 255, 0)
-                        cv2.circle(bottom, target, 7, color, 2)
-                    for sample in self.touch_calibration_samples:
-                        cv2.circle(bottom, sample, 5, (0, 255, 0), -1)
                 if state.touchScreenPressed:
                     cv2.circle(
                         bottom,
