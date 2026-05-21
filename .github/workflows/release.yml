@@ -1,9 +1,8 @@
 name: Build and Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -84,7 +83,7 @@ jobs:
           path: dist/${{ matrix.artifact_name }}
 
   release:
-    name: Create Release
+    name: Upload to Release
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -94,11 +93,10 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Create Release
+      - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          draft: false
-          prerelease: false
+          tag_name: ${{ github.event.release.tag_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
