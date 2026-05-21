@@ -34,6 +34,12 @@ jobs:
         if: matrix.arch == 'aarch64'
         uses: docker/setup-qemu-action@v3
 
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libfreetype6-dev libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -43,12 +49,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux' && matrix.arch != 'aarch64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libfreetype6-dev
 
       - name: Install dependencies
         run: uv sync --all-extras --dev
@@ -61,9 +61,10 @@ jobs:
         if: matrix.arch == 'aarch64'
         run: |
           docker run --rm -v ${{ github.workspace }}:/src -w /src arm64v8/ubuntu:22.04 /bin/bash -c "
-            apt-get update && apt-get install -y python3 python3-pip libgl1-mesa-glx libglib2.0-0 libfontconfig1 libxrender1 libdbus-1-3 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-xinput0 libxcb-xfixes0 libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libfreetype6-dev
-            pip install uv
-            uv sync --all-extras --dev
+            apt-get update && apt-get install -y python3.12 python3.12-dev python3-pip libgl1-mesa-glx libglib2.0-0 libfontconfig1 libxrender1 libdbus-1-3 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-xinput0 libxcb-xfixes0 libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libfreetype6-dev libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev curl
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH=\"$HOME/.local/bin:$PATH\"
+            uv sync --all-extras --dev --python 3.12
             uv run pyinstaller --noconfirm 3dsc2.spec
           "
 
