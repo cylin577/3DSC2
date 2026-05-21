@@ -47,6 +47,12 @@ This project uses **uv** for seamless dependency management.
    ```
    *Note: `uv` will automatically handle all dependencies including OpenCV, PyQt6, and Pygame.*
 
+2. Build a standalone executable (optional)
+   ```bash
+   uv run pyinstaller 3dsc2.spec
+   ```
+   The PyInstaller build uses `resources/splash.png` as the splash image and writes the executable to `dist/3DSC2`.
+
 3. Setup & Calibration
    - Enter your **3DS IP Address**.
    - Select your camera from the dropdown and click **Start Camera**.

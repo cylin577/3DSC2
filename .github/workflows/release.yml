@@ -1,0 +1,97 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+            artifact_name: 3DSC2-linux-x64
+          - os: windows-latest
+            arch: x64
+            artifact_name: 3DSC2-windows-x64.exe
+          - os: ubuntu-latest
+            arch: aarch64
+            artifact_name: 3DSC2-linux-aarch64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: "pyproject.toml"
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Build with PyInstaller (Linux/Windows x64)
+        if: matrix.arch != 'aarch64'
+        run: uv run pyinstaller --noconfirm 3dsc2.spec
+
+      - name: Build with PyInstaller (Linux aarch64 via Docker)
+        if: matrix.arch == 'aarch64'
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/src -w /src arm64v8/ubuntu:22.04 /bin/bash -c "
+            apt-get update && apt-get install -y python3 python3-pip libgl1-mesa-glx libglib2.0-0 libfontconfig1 libxrender1 libdbus-1-3 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-xinput0 libxcb-xfixes0
+            pip install uv
+            uv sync --all-extras --dev
+            uv run pyinstaller --noconfirm 3dsc2.spec
+          "
+
+      - name: Rename Artifact
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mv dist/3DSC2.exe dist/${{ matrix.artifact_name }}
+          else
+            mv dist/3DSC2 dist/${{ matrix.artifact_name }}
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

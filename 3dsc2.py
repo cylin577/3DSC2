@@ -12,11 +12,14 @@ import pygame
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QFormLayout, QLineEdit, QPushButton, 
                              QCheckBox, QDialog, QComboBox, QLabel, QMessageBox,
-                             QGroupBox, QTextEdit, QFileDialog, QSlider)
+                             QGroupBox, QTextEdit, QFileDialog, QSlider, QSplashScreen)
 from PyQt6.QtCore import (QTimer, QSettings, Qt, QPoint, QByteArray, 
                           QEvent, QObject, pyqtSignal)
 from PyQt6.QtGui import QPainter, QPen, QColor, QMouseEvent, QCloseEvent, QImage, QPixmap
 from PyQt6.QtNetwork import QUdpSocket, QHostAddress
+
+# Custom Splash
+pyi_splash = None
 
 # Constants
 CPAD_BOUND = 0x5d0
@@ -1542,9 +1545,35 @@ class AppWindow(QMainWindow):
         self.stop_camera(); 
         e.accept()
 
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 def main():
     print("DEBUG: Entering main")
     app = QApplication(sys.argv)
+    
+    # PyQt6 Splash Screen
+    splash_path = resource_path("resources/splash.png")
+    print(f"DEBUG: Splash path: {splash_path}")
+    splash_pix = QPixmap(splash_path)
+    if splash_pix.isNull():
+        print("DEBUG: Splash image failed to load!")
+    
+    splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
+    splash.show()
+    splash.showMessage("Starting 3DSC2...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, QColor("white"))
+    app.processEvents()
+
+    # Small sleep to ensure splash is visible if init is too fast
+    time.sleep(1.0)
+    app.processEvents()
+
     print("DEBUG: QApplication created")
     style = """
     QWidget { background-color: #1e1e1e; color: #e0e0e0; font-family: sans-serif; }
@@ -1555,11 +1584,14 @@ def main():
     QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #aaa; }
     """
     app.setStyleSheet(style)
+    splash.showMessage("Initializing UI...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, QColor("white"))
+    app.processEvents()
+
     print("DEBUG: Style set")
     win = AppWindow()
     print("DEBUG: Window created")
     win.show()
-    print("DEBUG: Window shown, starting exec")
+    splash.finish(win)
     sys.exit(app.exec())
 
 if __name__ == "__main__":
