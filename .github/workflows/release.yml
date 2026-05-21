@@ -60,7 +60,7 @@ jobs:
       - name: Build with PyInstaller (Linux aarch64 via Docker)
         if: matrix.arch == 'aarch64'
         run: |
-          docker run --rm -v ${{ github.workspace }}:/src -w /src arm64v8/ubuntu:22.04 /bin/bash -c "
+          docker run --rm --platform linux/arm64 -v ${{ github.workspace }}:/src -w /src arm64v8/ubuntu:22.04 /bin/bash -c "
             apt-get update && apt-get install -y python3.12 python3.12-dev python3-pip libgl1-mesa-glx libglib2.0-0 libfontconfig1 libxrender1 libdbus-1-3 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-xinput0 libxcb-xfixes0 libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libfreetype6-dev libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev curl
             curl -LsSf https://astral.sh/uv/install.sh | sh
             export PATH=\"$HOME/.local/bin:$PATH\"
