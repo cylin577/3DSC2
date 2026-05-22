@@ -1,5 +1,5 @@
 
-
+[![Build and Release](https://github.com/cylin577/3DSC2/actions/workflows/release.yml/badge.svg)](https://github.com/cylin577/3DSC2/actions/workflows/release.yml)
 
 # 3DSC2
 **3DS** **C**apture and **C**ontrol
