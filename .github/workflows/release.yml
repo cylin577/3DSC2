@@ -76,6 +76,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install Build Tools
+        run: |
+          apt-get update && apt-get install -y wget unzip
+          # Install bannertool
+          wget https://github.com/Steveice10/bannertool/releases/download/1.2.0/bannertool-linux.zip
+          unzip bannertool-linux.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/bannertool
+          # Install makerom
+          wget https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.3/makerom-v0.18.3-ubuntu_x86_64.zip
+          unzip makerom-v0.18.3-ubuntu_x86_64.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/makerom
+
       - name: Build .3dsx and .cia
         run: |
           cd calibration_client
