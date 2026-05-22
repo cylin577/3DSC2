@@ -94,13 +94,17 @@ jobs:
           cd calibration_client
           make 3dsx cia
 
-      - name: Upload 3DS Artifacts
+      - name: Upload 3DSX Artifact
         uses: actions/upload-artifact@v4
         with:
-          path: |
-            calibration_client/*.3dsx
-            calibration_client/*.cia
-          archive: false
+          name: 3DSC2-calibration-client.3dsx
+          path: calibration_client/*.3dsx
+
+      - name: Upload CIA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3DSC2-calibration-client.cia
+          path: calibration_client/*.cia
 
   release:
     name: Upload to Release
