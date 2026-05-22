@@ -18,25 +18,15 @@ jobs:
         include:
           - os: ubuntu-22.04
             arch: x64
-            artifact_name: 3DSC2-linux-x64
-          - os: windows-latest
-            arch: x64
-            artifact_name: 3DSC2-windows-x64.exe
           - os: ubuntu-22.04-arm
             arch: aarch64
-            artifact_name: 3DSC2-linux-aarch64
+          - os: windows-latest
+            arch: x64
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libfreetype6-dev libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev
-
-      - name: Install uv
+      - name: Set up uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
@@ -49,64 +39,68 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
-      - name: Install CPU-only torch for x64
-        if: matrix.arch == 'x64'
+      - name: Install CPU-only torch for Linux
+        if: runner.os == 'Linux'
         run: |
-          uv pip uninstall -y torch torchvision
+          uv pip uninstall -y torch torchvision triton nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-cufile-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-cusparselt-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvshmem-cu12 nvidia-nvtx-cu12
           uv pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cpu
 
       - name: Build with PyInstaller
         run: uv run pyinstaller --noconfirm 3dsc2.spec
 
-      - name: Rename Artifact
-        shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            mv dist/3DSC2.exe dist/${{ matrix.artifact_name }}
-          else
-            mv dist/3DSC2 dist/${{ matrix.artifact_name }}
-          fi
-
-      - name: Upload Artifact
+      - name: Upload artifact (Linux x64)
+        if: matrix.os == 'ubuntu-22.04' && matrix.arch == 'x64'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.artifact_name }}
+          name: 3DSC2-linux-x64
+          path: dist/3dsc2
+
+      - name: Upload artifact (Linux aarch64)
+        if: matrix.os == 'ubuntu-22.04-arm' && matrix.arch == 'aarch64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3DSC2-linux-aarch64
+          path: dist/3dsc2
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3DSC2-windows-x64.exe
+          path: dist/3dsc2.exe
 
   build-3ds:
     name: Build 3DS Calibration Client
     runs-on: ubuntu-latest
-    container:
-      image: devkitpro/devkitarm:latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    container: devkitpro/devkitarm:latest
 
-      - name: Install Build Tools
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
         run: |
           apt-get update && apt-get install -y wget unzip
-          # Install bannertool (diasurgical fork)
-          wget https://github.com/diasurgical/bannertool/releases/download/1.2.0/bannertool.zip
-          unzip -o bannertool.zip
-          mv linux-x86_64/bannertool /usr/local/bin/
+          wget https://github.com/Steveice10/bannertool/releases/download/1.2.0/bannertool.zip
+          unzip bannertool.zip -d .
+          cp linux-x86_64/bannertool /usr/local/bin/bannertool
           chmod +x /usr/local/bin/bannertool
-          # Install makerom (Project_CTR)
           wget https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.3/makerom-v0.18.3-ubuntu_x86_64.zip
-          unzip -o makerom-v0.18.3-ubuntu_x86_64.zip -d /usr/local/bin
+          unzip makerom-v0.18.3-ubuntu_x86_64.zip -d .
+          cp makerom /usr/local/bin/makerom
           chmod +x /usr/local/bin/makerom
 
-      - name: Build .3dsx and .cia
+      - name: Build 3dsx and cia
         run: |
           cd calibration_client
           make 3dsx cia
 
-      - name: Upload 3DSX Artifact
+      - name: Upload 3dsx
         uses: actions/upload-artifact@v4
         with:
           name: 3DSC2-calibration-client.3dsx
           path: calibration_client/*.3dsx
 
-      - name: Upload CIA Artifact
+      - name: Upload cia
         uses: actions/upload-artifact@v4
         with:
           name: 3DSC2-calibration-client.cia
@@ -116,14 +110,17 @@ jobs:
     name: Upload to Release
     needs: [build-python, build-3ds]
     runs-on: ubuntu-latest
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-          
-      - name: Get Latest Release
+
+      - name: Get latest release tag
+        id: latest_release
         uses: actions/github-script@v7
         with:
           script: |
@@ -134,7 +131,6 @@ jobs:
             });
             const latestRelease = releases.data[0];
             core.setOutput('tag_name', latestRelease.tag_name);
-
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
