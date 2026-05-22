@@ -78,8 +78,8 @@ jobs:
 
       - name: Build .3dsx and .cia
         run: |
-          # Use the provided Makefile in calibration_client
-          make -C calibration_client cia
+          cd calibration_client
+          make 3dsx cia
 
       - name: Upload 3DS Artifacts
         uses: actions/upload-artifact@v4
