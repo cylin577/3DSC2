@@ -1,6 +1,6 @@
 import sys
 import os
-
+import time
 # --- Early Splash Screen (before ALL imports) ---
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -20,10 +20,10 @@ _splash_pix = QPixmap(splash_path)
 _splash = QSplashScreen(_splash_pix, Qt.WindowType.WindowStaysOnTopHint)
 _splash.show()
 _splash.showMessage("Loading modules...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, QColor("white"))
+time.sleep(3) #Wait so user can admire my beautiful splash screen
 _app.processEvents()
 
 # --- All other imports (after splash is visible) ---
-import time
 import math
 import struct
 import socket
