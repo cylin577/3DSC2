@@ -46,15 +46,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
       - name: Install CPU-only torch for x64
         if: matrix.arch == 'x64'
         run: |
-          uv venv
           uv pip uninstall -y torch torchvision
           uv pip install torch==2.9.1+cpu torchvision==0.24.1+cpu --index-url https://download.pytorch.org/whl/cpu
-
-      - name: Install dependencies
-        run: uv sync --all-extras --dev
 
       - name: Build with PyInstaller
         run: uv run pyinstaller --noconfirm 3dsc2.spec
