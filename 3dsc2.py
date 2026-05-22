@@ -1,22 +1,48 @@
 import sys
+import os
+import time
+
+# --- Early Splash Screen (before heavy imports) ---
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+from PyQt6.QtWidgets import QApplication, QSplashScreen
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap, QColor
+
+_app = QApplication(sys.argv)
+splash_path = resource_path("resources/splash.png")
+_splash_pix = QPixmap(splash_path)
+_splash = QSplashScreen(_splash_pix, Qt.WindowType.WindowStaysOnTopHint)
+_splash.show()
+_splash.showMessage("Loading modules...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, QColor("white"))
+_app.processEvents()
+
+# --- Heavy imports ---
 import math
 import struct
 import socket
 import threading
-import time
 import json
-import os
 import cv2
 import numpy as np
 import pygame
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QFormLayout, QLineEdit, QPushButton, 
                              QCheckBox, QDialog, QComboBox, QLabel, QMessageBox,
-                             QGroupBox, QTextEdit, QFileDialog, QSlider, QSplashScreen)
-from PyQt6.QtCore import (QTimer, QSettings, Qt, QPoint, QByteArray, 
+                             QGroupBox, QTextEdit, QFileDialog, QSlider)
+from PyQt6.QtCore import (QTimer, QSettings, QPoint, QByteArray, 
                           QEvent, QObject, pyqtSignal)
-from PyQt6.QtGui import QPainter, QPen, QColor, QMouseEvent, QCloseEvent, QImage, QPixmap
+from PyQt6.QtGui import QPainter, QPen, QMouseEvent, QCloseEvent, QImage
 from PyQt6.QtNetwork import QUdpSocket, QHostAddress
+
+_splash.showMessage("Imports complete...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, QColor("white"))
+_app.processEvents()
 
 # Custom Splash
 pyi_splash = None
@@ -1545,33 +1571,13 @@ class AppWindow(QMainWindow):
         self.stop_camera(); 
         e.accept()
 
-def resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller """
-    try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
-
 def main():
+    global _app, _splash
     print("DEBUG: Entering main")
-    app = QApplication(sys.argv)
-    
-    # PyQt6 Splash Screen
-    splash_path = resource_path("resources/splash.png")
-    print(f"DEBUG: Splash path: {splash_path}")
-    splash_pix = QPixmap(splash_path)
-    if splash_pix.isNull():
-        print("DEBUG: Splash image failed to load!")
-    
-    splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
-    splash.show()
-    splash.showMessage("Starting 3DSC2...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, QColor("white"))
-    app.processEvents()
+    app = _app
+    splash = _splash
 
-    # Small sleep to ensure splash is visible if init is too fast
-    time.sleep(1.0)
+    splash.showMessage("Starting 3DSC2...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, QColor("white"))
     app.processEvents()
 
     print("DEBUG: QApplication created")
