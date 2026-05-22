@@ -1,8 +1,7 @@
 import sys
 import os
-import time
 
-# --- Early Splash Screen (before heavy imports) ---
+# --- Early Splash Screen (before ALL imports) ---
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
     try:
@@ -23,7 +22,8 @@ _splash.show()
 _splash.showMessage("Loading modules...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, QColor("white"))
 _app.processEvents()
 
-# --- Heavy imports ---
+# --- All other imports (after splash is visible) ---
+import time
 import math
 import struct
 import socket
