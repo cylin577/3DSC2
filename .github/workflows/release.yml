@@ -79,14 +79,15 @@ jobs:
       - name: Install Build Tools
         run: |
           apt-get update && apt-get install -y wget unzip
-          # Install bannertool
-          wget https://github.com/Steveice10/bannertool/releases/download/1.2.0/bannertool-linux.zip || \
-          wget https://github.com/Steveice10/bannertool/releases/download/1.2.0/bannertool.zip
-          unzip -o bannertool*.zip -d /usr/local/bin
+          # Install bannertool (diasurgical fork)
+          wget https://github.com/diasurgical/bannertool/releases/download/1.2.0/bannertool.zip
+          unzip -o bannertool.zip
+          mv linux-x86_64/bannertool /usr/local/bin/
           chmod +x /usr/local/bin/bannertool
-          # Install makerom
+          # Install makerom (Project_CTR)
           wget https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.3/makerom-v0.18.3-ubuntu_x86_64.zip
-          unzip -o makerom-v0.18.3-ubuntu_x86_64.zip -d /usr/local/bin
+          unzip -o makerom-v0.18.3-ubuntu_x86_64.zip
+          mv makerom /usr/local/bin/
           chmod +x /usr/local/bin/makerom
 
       - name: Build .3dsx and .cia
