@@ -97,10 +97,10 @@ jobs:
       - name: Upload 3DS Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: 3DSC2-3DS-Homebrew
           path: |
             calibration_client/*.3dsx
             calibration_client/*.cia
+          archive: false
 
   release:
     name: Upload to Release
