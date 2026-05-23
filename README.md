@@ -30,13 +30,17 @@ cd 3DSC2
 ```
 
 #### CUDA Support
-Prebuilt binaries come with **CPU-only PyTorch** for compatibility and reducing binary size 
-If you need CUDA support, you'll need to build from source manually:
+Prebuilt binaries are **CPU-only** to minimize size (~250MB vs ~4GB).  
+If you need GPU acceleration (NVIDIA only), build from source using the default `pyproject.toml`:
+
 ```bash
-uv pip uninstall -y torch torchvision
-uv pip install torch torchvision
+uv sync --all-extras
 ```
-See [How to use](#how-to-use) below for running from source with `uv`.
+For CPU-only source install:
+```bash
+cp pyproject.cpu.toml pyproject.toml
+uv sync --all-extras
+```
 
 ### Installing 3DSC2C (3DS)
 You can install the calibration companion app directly from Universal-Updater.

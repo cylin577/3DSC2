@@ -46,14 +46,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Use CPU-only config for Linux
+        if: runner.os == 'Linux'
+        run: cp pyproject.cpu.toml pyproject.toml
+
       - name: Install dependencies
         run: uv sync --all-extras --dev
-
-      - name: Install CPU-only torch for Linux
-        if: runner.os == 'Linux'
-        run: |
-          uv pip uninstall -y torch torchvision triton nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-cufile-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-cusparselt-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvshmem-cu12 nvidia-nvtx-cu12
-          uv pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cpu
 
       - name: Build with PyInstaller
         run: uv run pyinstaller --noconfirm 3dsc2.spec
