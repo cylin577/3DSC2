@@ -978,6 +978,11 @@ class AppWindow(QMainWindow):
         self.url_edit = QLineEdit(state.settings.value("camUrl", ""))
         self.url_edit.setPlaceholderText("http://192.168.x.x:4747/video")
         cam_layout.addRow("IP Cam URL:", self.url_edit)
+        
+        self.use_ip_cam = QCheckBox("Use IP Camera")
+        self.use_ip_cam.setChecked(state.settings.value("useIpCam", False, type=bool))
+        cam_layout.addRow("", self.use_ip_cam)
+        
         self.ip_edit = QLineEdit(state.ipAddress)
         cam_layout.addRow("3DS IP:", self.ip_edit)
         layout.addWidget(cam_group)
@@ -1073,6 +1078,8 @@ class AppWindow(QMainWindow):
         self.reset_btn.clicked.connect(self.reset_rois)
         self.config_btn.clicked.connect(self.remap_dlg.show)
         self.ip_edit.textChanged.connect(self.update_ip)
+        self.camera_combo.currentIndexChanged.connect(lambda: self.use_ip_cam.setChecked(False))
+        self.url_edit.textChanged.connect(lambda text: self.use_ip_cam.setChecked(True) if text.strip() else None)
         self.inv_y.stateChanged.connect(self.update_settings)
         self.inv_ab.stateChanged.connect(self.update_settings)
         self.inv_xy.stateChanged.connect(self.update_settings)
@@ -1395,6 +1402,7 @@ class AppWindow(QMainWindow):
         self.remote_server.start()
         self.remote_btn.setEnabled(False)
         self.url_edit.setText(f"http://{ip}:5000")
+        self.use_ip_cam.setChecked(True)
         self.status_label.setText(f"Server at: http://{ip}:5000")
         QMessageBox.information(self, "Remote Cam", f"Open this URL on your iPhone:\nhttp://{ip}:5000")
         
@@ -1407,12 +1415,17 @@ class AppWindow(QMainWindow):
         self.stop_btn.setEnabled(True)
 
     def start_camera(self):
-        url = self.url_edit.text().strip()
-        if url:
+        if self.use_ip_cam.isChecked():
+            url = self.url_edit.text().strip()
+            if not url:
+                self.signals.error_occurred.emit("Please enter an IP Cam URL or uncheck 'Use IP Camera'")
+                return
             source = url
             state.settings.setValue("camUrl", url)
         else:
             source = self.camera_combo.currentIndex()
+        
+        state.settings.setValue("useIpCam", self.use_ip_cam.isChecked())
         
         self.threaded_cap = ThreadedCamera(source)
         if not self.threaded_cap.cap.isOpened():
