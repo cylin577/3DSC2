@@ -965,10 +965,26 @@ class AppWindow(QMainWindow):
 
     def setup_ui(self):
         self.setWindowTitle("3DSC2")
-        self.setMinimumSize(600, 750)
+        self.setFixedWidth(680)
+        self.setMinimumHeight(750)
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
+
+        banner = QLabel()
+        banner.setObjectName("AppBanner")
+        banner_pixmap = QPixmap(resource_path("resources/banner_app.png"))
+        if not banner_pixmap.isNull():
+            banner.setPixmap(
+                banner_pixmap.scaledToWidth(
+                    320,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(banner)
 
         cam_group = QGroupBox("Camera & Network")
         cam_layout = QFormLayout(cam_group)
@@ -1595,12 +1611,108 @@ def main():
 
     print("DEBUG: QApplication created")
     style = """
-    QWidget { background-color: #1e1e1e; color: #e0e0e0; font-family: sans-serif; }
-    QLineEdit, QComboBox, QTextEdit { background-color: #2d2d2d; border: 1px solid #3d3d3d; border-radius: 4px; color: #fff; padding: 4px; }
-    QPushButton { background-color: #333; border: 1px solid #444; border-radius: 6px; padding: 8px; color: #fff; font-weight: bold; }
-    QPushButton:hover { background-color: #444; }
-    QGroupBox { border: 1px solid #444; margin-top: 15px; font-weight: bold; padding-top: 20px; }
-    QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #aaa; }
+    QWidget {
+        background-color: #0e0e0f;
+        color: #f6f6f7;
+        font-family: "Century Gothic", "Montserrat", "Segoe UI", sans-serif;
+        font-size: 10pt;
+    }
+    QLabel#AppBanner {
+        background-color: transparent;
+        padding: 2px 0 8px 0;
+    }
+    QLineEdit,
+    QComboBox,
+    QTextEdit {
+        background-color: #19191b;
+        border: 1px solid #3b3c3f;
+        border-radius: 6px;
+        color: #f6f6f7;
+        selection-background-color: #c7c9cc;
+        selection-color: #0e0e0f;
+        padding: 6px 8px;
+    }
+    QLineEdit:focus,
+    QComboBox:focus,
+    QTextEdit:focus {
+        border-color: #c7c9cc;
+    }
+    QComboBox::drop-down {
+        border: 0;
+        width: 24px;
+    }
+    QPushButton {
+        background-color: #202124;
+        border: 1px solid #4b4d51;
+        border-radius: 6px;
+        color: #f6f6f7;
+        font-weight: 600;
+        min-height: 24px;
+        padding: 7px 10px;
+    }
+    QPushButton:hover {
+        background-color: #2a2b2f;
+        border-color: #c7c9cc;
+    }
+    QPushButton:pressed,
+    QPushButton:checked {
+        background-color: #c7c9cc;
+        border-color: #d8dade;
+        color: #0e0e0f;
+    }
+    QPushButton:disabled {
+        background-color: #151517;
+        border-color: #2a2b2e;
+        color: #6e7075;
+    }
+    QGroupBox {
+        border: 1px solid #333438;
+        border-radius: 6px;
+        margin-top: 16px;
+        padding: 18px 10px 10px 10px;
+        font-weight: 600;
+    }
+    QGroupBox::title {
+        subcontrol-origin: margin;
+        left: 10px;
+        padding: 0 6px;
+        color: #c7c9cc;
+        background-color: #0e0e0f;
+    }
+    QCheckBox {
+        spacing: 8px;
+    }
+    QCheckBox::indicator {
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+        border: 1px solid #4b4d51;
+        background-color: #19191b;
+    }
+    QCheckBox::indicator:hover {
+        border-color: #c7c9cc;
+    }
+    QCheckBox::indicator:checked {
+        background-color: #c7c9cc;
+        border-color: #d8dade;
+    }
+    QSlider::groove:horizontal {
+        height: 6px;
+        border-radius: 3px;
+        background-color: #2b2c30;
+    }
+    QSlider::sub-page:horizontal {
+        border-radius: 3px;
+        background-color: #c7c9cc;
+    }
+    QSlider::handle:horizontal {
+        width: 16px;
+        height: 16px;
+        margin: -5px 0;
+        border-radius: 8px;
+        background-color: #f6f6f7;
+        border: 1px solid #c7c9cc;
+    }
     """
     app.setStyleSheet(style)
     splash.showMessage("Initializing UI...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, QColor("white"))
